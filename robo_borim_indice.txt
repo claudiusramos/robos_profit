@@ -1,0 +1,261 @@
+// ==========================
+// Estratégia Hilo + Delta + Bollinger clássica + Micromomento de Juros + Gestor ATR
+// ==========================
+
+// Winfut 5 minutos
+const
+    A1 = asset("Di1f35", feedBMF);
+    A2 = asset("Di1f27", feedBMF);
+    A3 = asset("Di1f29", feedBMF);
+    A4 = asset("Di1f31", feedBMF);
+    A5 = asset("Di1f33", feedBMF);
+
+input
+    // Básicos de operação
+    PeriodoHilo(3);
+    QuantidadePorOrdem(1);
+    DistanciaEntreOrdens(150.0);
+
+    // Stops/Targets (pode usar ATR ou valores fixos em reais)
+    UseATRStops(true);
+    StopGainReais(50.0);
+    StopLossReais(40.0);
+
+    // ATR (gestor de posição)
+    PeriodoATR(14);
+    FatorATR_Gain(2.0);
+    FatorATR_Loss(1.5);
+    OffsetPts(0.0);
+
+    // Ativo (dólar ou índice)
+    EhDolar(false);
+
+    // Delta
+    PeriodoDelta(20);
+    UsarDelta(true);
+
+    // Bandas de Bollinger clássicas
+    PeriodoBB(20);
+    FatorDesvio(2.0);
+
+    // Neutralizar sinais quando JUROS = 0?
+    NeutralizarQuandoJurosZero(true);
+
+var
+    // Conversões
+    F, D, ValorPonto: real;
+    Q: integer;
+
+    // Stops em pontos
+    StopGainPts, StopLossPts: real;
+
+    // Delta
+    DeltaAcumulado, MediaDelta: real;
+
+    // Hilo
+    HiloValor, MediaFechamento: real;
+
+    // Bandas
+    MediaBB, Desvio, BandaSuperior, BandaInferior: real;
+
+    // Juros micromomento
+    var35, var27, var29, var31, var33, JUROS: real;
+
+    // Sinais
+    SinalC, SinalV: boolean;
+    PrecoEntrada: real;
+
+    // ATR
+    TR, somaTR, ATR: real;
+    max1, max2, maxTR: real;
+
+    i: integer;
+
+begin
+    // ---------------- Conversões iniciais ----------------
+    F := Close;
+    D := DistanciaEntreOrdens;
+    Q := QuantidadePorOrdem;
+
+    if EhDolar then
+        ValorPonto := 10.0
+    else
+        ValorPonto := 0.20;
+
+    // ---------------- Cálculo ATR (gestor de posição) ----------------
+    somaTR := 0;
+    for i := 0 to (PeriodoATR - 1) do
+    begin
+        max1 := High[i] - Low[i];
+        max2 := Abs(High[i] - Close[i + 1]);
+        if max1 > max2 then
+            maxTR := max1
+        else
+            maxTR := max2;
+
+        if maxTR < Abs(Low[i] - Close[i + 1]) then
+            TR := Abs(Low[i] - Close[i + 1])
+        else
+            TR := maxTR;
+
+        somaTR := somaTR + TR;
+    end;
+
+    if PeriodoATR > 0 then
+        ATR := somaTR / PeriodoATR
+    else
+        ATR := 0;
+
+    // ---------------- Define StopGainPts / StopLossPts (ATR ou fixo em reais) ----------------
+    if UseATRStops then
+    begin
+        if ATR > 0 then
+        begin
+            StopGainPts := (ATR * FatorATR_Gain) + OffsetPts;
+            StopLossPts := (ATR * FatorATR_Loss) + OffsetPts;
+        end
+        else
+        begin
+            StopGainPts := 0;
+            StopLossPts := 0;
+            SinalC := false;
+            SinalV := false;
+        end;
+    end
+    else
+    begin
+        StopGainPts := StopGainReais / ValorPonto + OffsetPts;
+        StopLossPts := StopLossReais / ValorPonto + OffsetPts;
+    end;
+
+    // ---------------- Cálculo Delta (acumulado ponderado por volume) ----------------
+    DeltaAcumulado := 0;
+    for i := 0 to (PeriodoDelta - 1) do
+        DeltaAcumulado := DeltaAcumulado + ((Close[i] - Open[i]) * Volume[i]);
+
+    if PeriodoDelta > 0 then
+        MediaDelta := DeltaAcumulado / PeriodoDelta
+    else
+        MediaDelta := 0;
+
+    // ---------------- Média do Fechamento (para Hilo) ----------------
+    MediaFechamento := 0;
+    for i := 0 to (PeriodoHilo - 1) do
+        MediaFechamento := MediaFechamento + Close[i];
+    if PeriodoHilo > 0 then
+        MediaFechamento := MediaFechamento / PeriodoHilo;
+
+    // ---------------- Hilo Activator ----------------
+    if Close > MediaFechamento then
+        HiloValor := Lowest(Low, PeriodoHilo)
+    else
+        HiloValor := Highest(High, PeriodoHilo);
+
+    // ---------------- Bollinger clássica (média + desvio) ----------------
+    MediaBB := 0;
+    for i := 0 to (PeriodoBB - 1) do
+        MediaBB := MediaBB + Close[i];
+    if PeriodoBB > 0 then
+        MediaBB := MediaBB / PeriodoBB
+    else
+        MediaBB := 0;
+Desvio := 0;
+    for i := 0 to (PeriodoBB - 1) do
+        Desvio := Desvio + (Close[i] - MediaBB) * (Close[i] - MediaBB);
+    if PeriodoBB > 0 then
+        Desvio := Sqrt(Desvio / PeriodoBB)
+    else
+        Desvio := 0;
+
+    BandaSuperior := MediaBB + (Desvio * FatorDesvio);
+    BandaInferior := MediaBB - (Desvio * FatorDesvio);
+
+    // ---------------- Micromomento de Juros ----------------
+    var35 := A1.Close - A1.Close[1];
+    var27 := A2.Close - A2.Close[1];
+    var29 := A3.Close - A3.Close[1];
+    var31 := A4.Close - A4.Close[1];
+    var33 := A5.Close - A5.Close[1];
+
+    JUROS := (var35 * 0.2) + (var27 * 0.2) + (var29 * 0.2) + (var31 * 0.2) + (var33 * 0.2);
+
+    // ---------------- Sinais (Hilo + Delta + Bandas) ----------------
+    if UsarDelta then
+    begin
+        SinalC := (F > HiloValor) and (DeltaAcumulado > MediaDelta) and (F < BandaSuperior);
+        SinalV := (F < HiloValor) and (DeltaAcumulado < MediaDelta) and (F > BandaInferior);
+    end
+    else
+    begin
+        SinalC := (F > HiloValor) and (F < BandaSuperior);
+        SinalV := (F < HiloValor) and (F > BandaInferior);
+    end;
+
+    // ---------------- Filtro Micromomento (JUROS) ----------------
+    if NeutralizarQuandoJurosZero and (JUROS = 0) then
+    begin
+        SinalC := false;
+        SinalV := false;
+    end
+    else
+    begin
+        if EhDolar then
+        begin
+            if SinalC and not (JUROS > 0) then SinalC := false;
+            if SinalV and not (JUROS < 0) then SinalV := false;
+        end
+        else
+        begin
+            if SinalC and not (JUROS < 0) then SinalC := false;
+            if SinalV and not (JUROS > 0) then SinalV := false;
+        end;
+    end;
+
+    // ---------------- Entradas ----------------
+    if (Position = 0) and SinalC then
+    begin
+        BuyAtMarket(Q);
+        PrecoEntrada := Close;
+    end;
+
+    if (Position = 0) and SinalV then
+    begin
+        SellShortAtMarket(Q);
+        PrecoEntrada := Close;
+    end;
+
+    // ---------------- Gestão da posição comprada ----------------
+    if Position > 0 then
+    begin
+        if (StopGainPts > 0) and (Close >= PrecoEntrada + StopGainPts) then
+            SellToCoverAtMarket(Q);
+
+        if (StopLossPts > 0) and (Close <= PrecoEntrada - StopLossPts) then
+            SellToCoverAtMarket(Q);
+
+        if SinalV then
+        begin
+            SellToCoverAtMarket(Q);
+            SellShortAtMarket(Q);
+            PrecoEntrada := Close;
+        end;
+    end;
+
+    // ---------------- Gestão da posição vendida ----------------
+    if Position < 0 then
+    begin
+        if (StopGainPts > 0) and (Close <= PrecoEntrada - StopGainPts) then
+            BuyToCoverAtMarket(Q);
+
+        if (StopLossPts > 0) and (Close >= PrecoEntrada + StopLossPts) then
+            BuyToCoverAtMarket(Q);
+
+        if SinalC then
+        begin
+            BuyToCoverAtMarket(Q);
+            BuyAtMarket(Q);
+            PrecoEntrada := Close;
+        end;
+    end;
+
+end;
